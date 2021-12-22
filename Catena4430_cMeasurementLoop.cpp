@@ -14,7 +14,7 @@ Author:
 */
 
 #include "Catena4430_cMeasurementLoop.h"
-
+#include <TimeLib.h>
 #include <Catena4430.h>
 #include <arduino_lmic.h>
 #include <Catena4430_Sensor.h>
@@ -30,6 +30,8 @@ static constexpr uint8_t kVddPin = D11;
 
 void lptimSleep(uint32_t timeOut);
 uint32_t HAL_AddTick(uint32_t delta);
+
+void user_request_network_time_cb(void *pVoidUserUTCTime, int flagSuccess);
 
 uint32_t timeOut = 200;
 
@@ -52,6 +54,9 @@ void cMeasurementLoop::begin()
         this->m_pirSampleTimer.begin(this->m_pirSampleSec * 1000);
         this->m_ActivityTimer.begin(this->m_ActivityTimerSec * 1000);
         }
+
+    /* figure out when to get network time */
+    m_RtcSetMs = (m_rtcSetSec + os_getRndU2() - 32768) * 1000;
 
     // start and initialize the PIR sensor
     this->m_pir.begin(gCatena);
@@ -94,6 +99,7 @@ void cMeasurementLoop::begin()
     if (! this->m_running)
         {
         this->m_fFwUpdate = false;
+        this->m_startTime = millis();
         this->m_exit = false;
         this->m_fsm.init(*this, &cMeasurementLoop::fsmDispatch);
         }
@@ -244,6 +250,14 @@ cMeasurementLoop::fsmDispatch(
 
             // calculate the new sleep interval.
             this->updateTxCycleTime();
+            }
+
+        if (uint32_t(millis() - this->m_startTime) > m_RtcSetMs)
+            {
+            uint32_t userUTCTime; // Seconds since the UTC epoch
+            // Schedule a network time request at the next possible time
+            LMIC_requestNetworkTime(user_request_network_time_cb, &userUTCTime);
+            this->m_startTime = millis();
             }
         break;
 
@@ -553,6 +567,68 @@ void cMeasurementLoop::poll()
     if (!(this->m_fUsbPower) && !(this->m_fFwUpdate) && !(os_queryTimeCriticalJobs(ms2osticks(timeOut))))
         lptimSleep(timeOut);
     }
+
+// Utility function for digital clock display: prints preceding colon and
+// leading 0
+void printDigits(int digits) {
+    Serial.print(':');
+    if (digits < 10) Serial.print('0');
+    Serial.print(digits);
+}
+
+void user_request_network_time_cb(void *pVoidUserUTCTime, int flagSuccess) {
+    // Explicit conversion from void* to uint32_t* to avoid compiler errors
+    uint32_t *pUserUTCTime = (uint32_t *) pVoidUserUTCTime;
+
+    // A struct that will be populated by LMIC_getNetworkTimeReference.
+    // It contains the following fields:
+    //  - tLocal: the value returned by os_GetTime() when the time
+    //            request was sent to the gateway, and
+    //  - tNetwork: the seconds between the GPS epoch and the time
+    //              the gateway received the time request
+    lmic_time_reference_t lmicTimeReference;
+
+    if (flagSuccess != 1) {
+        gCatena.SafePrintf("USER CALLBACK: Not a success\n");
+        return;
+    }
+
+    // Populate "lmic_time_reference"
+    flagSuccess = LMIC_getNetworkTimeReference(&lmicTimeReference);
+    if (flagSuccess != 1) {
+        gCatena.SafePrintf("USER CALLBACK: LMIC_getNetworkTimeReference didn't succeed\n");
+        return;
+    }
+
+    // Update userUTCTime, considering the difference between the GPS and UTC
+    // epoch, and the leap seconds
+    *pUserUTCTime = lmicTimeReference.tNetwork + 315964800;
+
+    // Add the delay between the instant the time was transmitted and
+    // the current time
+
+    // Current time, in ticks
+    ostime_t ticksNow = os_getTime();
+    // Time when the request was sent, in ticks
+    ostime_t ticksRequestSent = lmicTimeReference.tLocal;
+    uint32_t requestDelaySec = osticks2ms(ticksNow - ticksRequestSent) / 1000;
+    *pUserUTCTime += requestDelaySec;
+
+    // gDate.setGpsTime((int64_t)*pUserUTCTime);
+    gDate.setCommonTime((int64_t)*pUserUTCTime);
+
+    Serial.print(F("The current GPS time is: "));
+    Serial.print(gDate.hour());
+    printDigits(gDate.minute());
+    printDigits(gDate.second());
+    Serial.print(' ');
+    Serial.print(gDate.day());
+    Serial.print('/');
+    Serial.print(gDate.month());
+    Serial.print('/');
+    Serial.print(gDate.year());
+    Serial.println();
+}
 
 static void setup_lptim(uint32_t msec)
     {

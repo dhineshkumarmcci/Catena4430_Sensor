@@ -40,6 +40,7 @@ Author:
 #include <cstdint>
 
 extern McciCatena::Catena gCatena;
+extern McciCatena::cDate gDate;
 extern McciCatena::Catena::LoRaWAN gLoRaWAN;
 extern McciCatena::StatusLed gLed;
 
@@ -241,6 +242,7 @@ public:
         , m_txCycleSec_Permanent(6 * 60)    // default uplink interval
         , m_txCycleSec(60)                  // initial uplink interval
         , m_txCycleCount(10)                // initial count of fast uplinks
+        , m_rtcSetSec(12 * 60 * 60)     // set RTC time every 3 days
         , m_DebugFlags(DebugFlags(kError | kTrace))
         , m_ActivityTimerSec(60)            // the activity time sample interval
         {};
@@ -479,6 +481,11 @@ private:
     std::uint32_t                   m_txCycleSec;
     std::uint32_t                   m_txCycleCount;
     std::uint32_t                   m_txCycleSec_Permanent;
+
+    // RTC set time control
+    std::uint32_t                   m_rtcSetSec;
+    std::uint32_t                   m_RtcSetMs;
+    std::uint32_t                   m_startTime;
 
     // simple timer for timing-out sensors.
     std::uint32_t                   m_timer_start;
