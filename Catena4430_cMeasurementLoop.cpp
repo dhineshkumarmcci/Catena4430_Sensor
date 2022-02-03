@@ -55,9 +55,6 @@ void cMeasurementLoop::begin()
         this->m_ActivityTimer.begin(this->m_ActivityTimerSec * 1000);
         }
 
-    /* figure out when to get network time */
-    m_RtcSetMs = (m_rtcSetSec + os_getRndU2() - 32768) * 1000;
-
     // start and initialize the PIR sensor
     this->m_pir.begin(gCatena);
 
@@ -99,7 +96,7 @@ void cMeasurementLoop::begin()
     if (! this->m_running)
         {
         this->m_fFwUpdate = false;
-        this->m_startTime = millis();
+        this->startTime = millis();
         this->m_exit = false;
         this->m_fsm.init(*this, &cMeasurementLoop::fsmDispatch);
         }
@@ -252,12 +249,13 @@ cMeasurementLoop::fsmDispatch(
             this->updateTxCycleTime();
             }
 
-        if (uint32_t(millis() - this->m_startTime) > m_RtcSetMs)
+        uint32_t currentTimeSec;
+        currentTimeSec = uint32_t(millis() - this->m_startTime) / 1000;
+        if (currentTimeSec > m_rtcSetSec)
             {
             uint32_t userUTCTime; // Seconds since the UTC epoch
             // Schedule a network time request at the next possible time
             LMIC_requestNetworkTime(user_request_network_time_cb, &userUTCTime);
-            this->m_startTime = millis();
             }
         break;
 
@@ -568,14 +566,6 @@ void cMeasurementLoop::poll()
         lptimSleep(timeOut);
     }
 
-// Utility function for digital clock display: prints preceding colon and
-// leading 0
-void printDigits(int digits) {
-    Serial.print(':');
-    if (digits < 10) Serial.print('0');
-    Serial.print(digits);
-}
-
 void user_request_network_time_cb(void *pVoidUserUTCTime, int flagSuccess) {
     // Explicit conversion from void* to uint32_t* to avoid compiler errors
     uint32_t *pUserUTCTime = (uint32_t *) pVoidUserUTCTime;
@@ -617,17 +607,13 @@ void user_request_network_time_cb(void *pVoidUserUTCTime, int flagSuccess) {
     // gDate.setGpsTime((int64_t)*pUserUTCTime);
     gDate.setCommonTime((int64_t)*pUserUTCTime);
 
-    Serial.print(F("The current GPS time is: "));
-    Serial.print(gDate.hour());
-    printDigits(gDate.minute());
-    printDigits(gDate.second());
-    Serial.print(' ');
-    Serial.print(gDate.day());
-    Serial.print('/');
-    Serial.print(gDate.month());
-    Serial.print('/');
-    Serial.print(gDate.year());
-    Serial.println();
+    gCatena.SafePrintf(
+                "The current GPS time is: %04d-%02d-%02d %02d:%02d:%02d\n",
+                gDate.year(), gDate.month(), gDate.day(),
+                gDate.hour(), gDate.minute(), gDate.second()
+                );
+
+    gMeasurementLoop.startTime = millis();
 }
 
 static void setup_lptim(uint32_t msec)
