@@ -18,6 +18,7 @@ Author:
 #include <Catena.h>
 #include "Catena4430_Sensor.h"
 #include <arduino_lmic.h>
+#include <Catena_Date.h>
 #include <Catena_Timer.h>
 #include <Catena4430.h>
 #include <Catena4430_cPCA9570.h>
@@ -39,7 +40,7 @@ static_assert(
     "This sketch requires Catena-Arduino-Platform v0.21.0-5 or later"
     );
 
-constexpr std::uint32_t kAppVersion = makeVersion(0,5,1,1);
+constexpr std::uint32_t kAppVersion = makeVersion(0,5,2,0);
 constexpr std::uint32_t kDoubleResetWaitMs = 500;
 constexpr std::uint32_t kSetDoubleResetMagic = 0xCA44301;
 constexpr std::uint32_t kClearDoubleResetMagic = 0xCA44300;
@@ -58,6 +59,7 @@ cClockDriver_PCF8523    gClock      { &Wire };
 
 c4430Gpios gpio     { &i2cgpio };
 Catena gCatena;
+cDate gDate;
 cTimer ledTimer;
 Catena::LoRaWAN gLoRaWAN;
 StatusLed gLed (Catena::PIN_STATUS_LED);
@@ -127,11 +129,11 @@ void setup()
     setup_printSignOn();
 
     setup_flash();
+    setup_radio();
     setup_download();
     setup_measurement();
     setup_gpio();
     setup_rtc();
-    setup_radio();
     setup_commands();
     setup_start();
     }
