@@ -26,6 +26,7 @@ Author:
 #include <Catena_Led.h>
 #include <Catena_Log.h>
 #include <Catena_Mx25v8035f.h>
+#include <Catena4430_cClockDriver_PCF8523.h>
 #include <Catena_PollableInterface.h>
 #include <Catena_Si1133.h>
 #include <Catena_Timer.h>
@@ -43,6 +44,7 @@ extern McciCatena::Catena gCatena;
 extern McciCatena::cDate gDate;
 extern McciCatena::Catena::LoRaWAN gLoRaWAN;
 extern McciCatena::StatusLed gLed;
+extern  McciCatena4430::cClockDriver_PCF8523 gClock;
 
 namespace McciCatena4430 {
 
@@ -299,7 +301,7 @@ public:
     bool fDisableLED;
 
     // set start time when network time is being set
-    std::uint32_t m_startTime;
+    std::uint32_t startTime;
 
     // initialize measurement FSM.
     void begin();

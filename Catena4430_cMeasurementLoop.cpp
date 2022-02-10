@@ -92,6 +92,11 @@ void cMeasurementLoop::begin()
         gCatena.SafePrintf("No Si1133 found: check hardware\n");
         }
 
+    // read network time and set correct UTC time in RTC
+    uint32_t userUTCTime; // Seconds since the UTC epoch
+    // Schedule a network time request at the next possible time
+    LMIC_requestNetworkTime(user_request_network_time_cb, &userUTCTime);
+
     // start (or restart) the FSM.
     if (! this->m_running)
         {
@@ -250,7 +255,7 @@ cMeasurementLoop::fsmDispatch(
             }
 
         uint32_t currentTimeSec;
-        currentTimeSec = uint32_t(millis() - this->m_startTime) / 1000;
+        currentTimeSec = uint32_t(millis() - this->startTime) / 1000;
         if (currentTimeSec > m_rtcSetSec)
             {
             uint32_t userUTCTime; // Seconds since the UTC epoch
@@ -612,6 +617,12 @@ void user_request_network_time_cb(void *pVoidUserUTCTime, int flagSuccess) {
                 gDate.year(), gDate.month(), gDate.day(),
                 gDate.hour(), gDate.minute(), gDate.second()
                 );
+
+    unsigned errCode;
+    if (! gClock.set(gDate, &errCode))
+        {
+        gCatena.SafePrintf("couldn't set clock: %u\n", errCode);
+        }
 
     gMeasurementLoop.startTime = millis();
 }
