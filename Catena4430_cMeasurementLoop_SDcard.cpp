@@ -37,8 +37,6 @@ using namespace McciCatena;
 
 SDClass gSD;
 
-extern cMeasurementLoop *gpMeasurementLoopConcrete;
-
 constexpr char gkMigrateFileName[] = "MIGRATE.V3";
 
 /****************************************************************************\
@@ -148,8 +146,8 @@ cMeasurementLoop::checkSdCard()
     }
 
 static const char kHeader[] =
-    "Time,DevEUI,Raw,Port,Vbat,Version,BootCount,T,RH,P,Light,"
-    "CO2,P[0].delta,P[0].total,P[1].delta,P[1].total,"
+    "Time,DevEUI,Raw,Vbat,Vsystem,Vbus,BootCount,T,RH,P,Light,"
+    "P[0].delta,P[0].total,P[1].delta,P[1].total,"
     "Act[7],Act[6],Act[5],Act[4],Act[3],Act[2],Act[1],Act[0]"
     "\n";
 
@@ -207,7 +205,7 @@ cMeasurementLoop::writeSdCard(
         fNew = !gSD.exists(fName);
         if (fNew)
             {
-            // gCatena.SafePrintf("%s not found, will create & write header\n", fName);
+            //gCatena.SafePrintf("%s not found, will create & write header\n", fName);
             }
 
         File dataFile = gSD.open(fName, FILE_WRITE);
@@ -215,6 +213,7 @@ cMeasurementLoop::writeSdCard(
             {
             if (fNew)
                 {
+                //gCatena.SafePrintf("write header\n");
                 for (auto i : kHeader)
                     {
                     if (i == '\n')
@@ -239,8 +238,10 @@ cMeasurementLoop::writeSdCard(
                 d.year(), d.month(), d.day(),
                 d.hour(), d.minute(), d.second()
                 );
+            //gCatena.SafePrintf("write time\n");
             dataFile.print(buf);
 
+            //gCatena.SafePrintf("write DevEUI");
             do  {
                 CatenaBase::EUI64_buffer_t devEUI;
 
@@ -269,6 +270,7 @@ cMeasurementLoop::writeSdCard(
 
             dataFile.print(',');
 
+            //gCatena.SafePrintf("write raw hex\n");
             dataFile.print('"');
             for (unsigned i = 0; i < b.getn(); ++i)
                 {
@@ -282,48 +284,53 @@ cMeasurementLoop::writeSdCard(
 
             dataFile.print("\",");
 
-            dataFile.print(this->uplinkPort);
-            dataFile.print(',');
-
-            if (this->fData_Vbat)
+            //gCatena.SafePrintf("write Vbat\n");
+            if ((mData.flags & Flags::Vbat) != Flags(0))
                dataFile.print(mData.Vbat);
 
             dataFile.print(',');
 
-            if (this->fData_Version)
-                {
-                dataFile.print(mData.ver.Major);
-                dataFile.print('.');
-                dataFile.print(mData.ver.Minor);
-                dataFile.print('.');
-                dataFile.print(mData.ver.Patch);
-                dataFile.print('.');
-                dataFile.print(mData.ver.Local);
-                }
+            if ((mData.flags & Flags::Vcc) != Flags(0))
+                dataFile.print(mData.Vsystem);
 
             dataFile.print(',');
 
-            if (this->fData_BootCount)
+            if ((mData.flags & Flags::Vbus) != Flags(0))
+                dataFile.print(mData.Vbus);
+
+            dataFile.print(',');
+
+            if ((mData.flags & Flags::Boot) != Flags(0))
                 dataFile.print(mData.BootCount);
 
             dataFile.print(',');
 
-            gpMeasurementLoopConcrete->writeVersionData(dataFile);
-
-            if (this->fData_CO2)
+            if ((mData.flags & Flags::TH) != Flags(0))
                 {
-                dataFile.print(this->co2int);
-                dataFile.print('.');
-                dataFile.print(this->co2frac);
+                dataFile.print(mData.env.Temperature);
+                dataFile.print(',');
+
+                dataFile.print(mData.env.Humidity);
+                dataFile.print(',');
+                dataFile.print(',');
+                }
+            else
+                {
+                dataFile.print(",,,");
+                }
+
+            if ((mData.flags & Flags::Light) != Flags(0))
+                {
+                dataFile.print(mData.light.Lux);
                 }
             dataFile.print(',');
 
             for (auto const & feeder : mData.pellets)
                 {
-                if (this->fData_Pellet)
+                if ((mData.flags & Flags::Pellets) != Flags(0))
                     dataFile.print(unsigned(feeder.Recent));
                 dataFile.print(',');
-                if (this->fData_Pellet)
+                if ((mData.flags & Flags::Pellets) != Flags(0))
                     dataFile.print(feeder.Total);
                 dataFile.print(',');
                 }
@@ -331,7 +338,8 @@ cMeasurementLoop::writeSdCard(
             for (auto i = kMaxActivityEntries; i > 0; )
                 {
                 --i;
-                if (this->fData_Activity && i < mData.nActivity)
+                if ((mData.flags & Flags::Activity) != Flags(0) &&
+                    i < mData.nActivity)
                         dataFile.print(mData.activity[i].Avg);
                 if (i > 0)
                     dataFile.print(',');

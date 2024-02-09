@@ -94,7 +94,7 @@ cCommandStream::CommandStatus cmdDir(
     else
         sFile = argv[1];
 
-    bool fHaveCard = gpMeasurementLoopConcrete->checkSdCard();
+    bool fHaveCard = gMeasurementLoop.checkSdCard();
     if (! fHaveCard)
         {
         pThis->printf("%s: no SD card found\n", argv[0]);
@@ -114,7 +114,7 @@ cCommandStream::CommandStatus cmdDir(
         result = cCommandStream::CommandStatus::kSuccess;
         }
 
-    gpMeasurementLoopConcrete->sdFinish();
+    gMeasurementLoop.sdFinish();
     return result;    
     }
 

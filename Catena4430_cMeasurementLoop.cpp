@@ -19,12 +19,14 @@ Author:
 #include <arduino_lmic.h>
 #include <Catena4430_Sensor.h>
 
-using namespace McciCatena;
 using namespace McciCatena4430;
+using namespace McciCatena;
+
+using namespace McciCatenaSht3x;
+using namespace Mcci_Ltr_329als;
 
 extern c4430Gpios gpio;
-extern cMeasurementLoop *gpMeasurementLoopConcrete;
-extern Catena::LoRaWAN gLoRaWAN;
+extern cMeasurementLoop gMeasurementLoop;
 
 static constexpr uint8_t kVddPin = D11;
 
@@ -53,7 +55,6 @@ void cMeasurementLoop::begin()
         this->m_UplinkTimer.begin(this->m_txCycleSec * 1000);
         this->m_pirSampleTimer.begin(this->m_pirSampleSec * 1000);
         this->m_ActivityTimer.begin(this->m_ActivityTimerSec * 1000);
-        gLoRaWAN.SetReceiveBufferBufferCb(receiveMessage);
         }
 
     // start and initialize the PIR sensor
@@ -63,22 +64,27 @@ void cMeasurementLoop::begin()
     this->m_PelletFeeder.begin(gCatena);
 
     Wire.begin();
-    gpMeasurementLoopConcrete->beginSensors();
-
-    if (! m_Scd.begin())
+    if (this->m_Sht.begin())
         {
-        this->m_fScd30 = false;
-
-        gCatena.SafePrintf("No SCD30 found! Begin failed: %s(%u)\n",
-                    m_Scd.getLastErrorName(),
-                    unsigned(m_Scd.getLastError())
-                    );
+        this->m_fSht3x = true;
+        gCatena.SafePrintf("On-board Temperature Sensor detected\n");
         }
     else
         {
-        this->m_fScd30 = true;
-        this->m_fSleepScd30 = false;
-        this->printSCDinfo();
+        this->m_fSht3x = false;
+        gCatena.SafePrintf("No SHT3x found: check wiring\n");
+        }
+
+    if (this->m_Ltr.begin())
+        {
+        this->m_fHardError = false;
+        this->m_fLtr329 = true;
+        gCatena.SafePrintf("On-board Light Sensor detected\n");
+        }
+    else
+        {
+        this->m_fLtr329 = false;
+        gCatena.SafePrintf("No LTR329 found: check hardware\n");
         }
 
     // read network time and set correct UTC time in RTC
@@ -88,23 +94,10 @@ void cMeasurementLoop::begin()
     // Schedule a network time request at the next possible time
     LMIC_requestNetworkTime(user_request_network_time_cb, &userUTCTime);
 
-    // timer and flag for version over air
-    this->m_startTimeMs = millis();
-    this->m_fVersionOta = true;
-
-    // clear flag for Data limit
-    this->m_fDatalimit = false;
-
     // start (or restart) the FSM.
     if (! this->m_running)
         {
         this->m_fFwUpdate = false;
-        this->fData_Vbat = false;
-        this->fData_Version = false;
-        this->fData_CO2 = false;
-        this->fData_BootCount = false;
-        this->fData_Activity = false;
-        this->fData_Pellet = false;
         this->startTime = millis();
         this->m_exit = false;
         this->m_fsm.init(*this, &cMeasurementLoop::fsmDispatch);
@@ -173,12 +166,6 @@ cMeasurementLoop::fsmDispatch(
             {
             // reset the counters.
             this->resetPirAccumulation();
-            this->fData_Vbat = false;
-            this->fData_Version = false;
-            this->fData_CO2 = false;
-            this->fData_BootCount = false;
-            this->fData_Activity = false;
-            this->fData_Pellet = false;
 
             if (!(this->fDisableLED && this->m_fLowLight))
                 {
@@ -196,10 +183,7 @@ cMeasurementLoop::fsmDispatch(
         else if (this->m_UplinkTimer.isready())
             newState = State::stMeasure;
         else if (this->m_UplinkTimer.getRemaining() > 1500)
-            {
-            this->m_fSleepScd30 = true;
             this->sleep();
-            }
         break;
 
     // get some data. This is only called while booting up.
@@ -219,11 +203,21 @@ cMeasurementLoop::fsmDispatch(
     case State::stMeasure:
         if (fEntry)
             {
+            this->updateSynchronousMeasurements();
+            this->setTimer(1000);
             }
 
-        this->updateSynchronousMeasurements();
-        newState = State::stTransmit;
-
+        if (this->m_fLtr329)
+            {
+            this->updateLightMeasurements();
+            newState = State::stTransmit;
+            }
+        else if (this->timedOut())
+            {
+            this->m_fHardError = true;
+            if (this->isTraceEnabled(this->DebugFlags::kError))
+                gCatena.SafePrintf("LTR329 timed out\n");
+            }
         break;
 
     case State::stTransmit:
@@ -231,37 +225,17 @@ cMeasurementLoop::fsmDispatch(
             {
             TxBuffer_t b;
 
-            gpMeasurementLoopConcrete->formatMeasurements(b, this->m_data);
+            this->fillTxBuffer(b, this->m_data);
             this->m_FileData = this->m_data;
 
             this->m_FileTxBuffer.begin();
             for (auto i = 0; i < b.getn(); ++i)
                 this->m_FileTxBuffer.put(b.getbase()[i]);
 
+            this->resetMeasurements();
+
             if (gLoRaWAN.IsProvisioned())
                 this->startTransmission(b);
-
-            while (true)
-                {
-                std::uint32_t lmicCheckTime;
-                os_runloop_once();
-                lmicCheckTime = this->m_UplinkTimer.getRemaining();
-
-                // if we can sleep, break out of this loop
-                // NOTE: if that the TX is not ready, LMIC is still waiting for interrupt
-                if (! os_queryTimeCriticalJobs(ms2osticks(lmicCheckTime)) && LMIC_queryTxReady())
-                    {
-                    break;
-                    }
-
-                gCatena.poll();
-                yield();
-                }
-            if (this->m_fRxAck)
-                {
-                this->sendDownlinkAck();
-                this->m_fRxAck = false;
-                }
             }
         if (! gLoRaWAN.IsProvisioned())
             {
@@ -297,8 +271,6 @@ cMeasurementLoop::fsmDispatch(
             newState = State::stTryToUpdate;
         else
             newState = State::stAwaitCard;
-
-        this->resetMeasurements();
         break;
 
     // try to update firmware
@@ -380,124 +352,39 @@ cMeasurementLoop::fsmDispatch(
 void cMeasurementLoop::resetMeasurements()
     {
     memset((void *) &this->m_data, 0, sizeof(this->m_data));
-    gpMeasurementLoopConcrete->clearMeasurements();
-    }
-
-void cMeasurementLoop::updateScd30Measurements()
-    {
-    if (this->m_fScd30)
-        {
-        bool fError;
-        if (this->m_Scd.queryReady(fError))
-            {
-            this->m_measurement_valid = this->m_Scd.readMeasurement();
-            if ((! this->m_measurement_valid) && gLog.isEnabled(gLog.kError))
-                {
-                gLog.printf(gLog.kError, "SCD30 measurement failed: error %s(%u)\n",
-                        this->m_Scd.getLastErrorName(),
-                        unsigned(this->m_Scd.getLastError())
-                        );
-                }
-            }
-        else if (fError)
-            {
-            if (gLog.isEnabled(gLog.DebugFlags::kError))
-                gLog.printf(
-                    gLog.kAlways,
-                    "SCD30 queryReady failed: status %s(%u)\n",
-                    this->m_Scd.getLastErrorName(),
-                    unsigned(this->m_Scd.getLastError())
-                    );
-            }
-        }
-
-    if (this->m_fScd30 && this->m_measurement_valid)
-        {
-        auto const m = this->m_Scd.getMeasurement();
-        // temperature is 2 bytes from -163.840 to +163.835 degrees C
-        // pressure is 4 bytes, first signed units, then scale.
-        if (gLog.isEnabled(gLog.kInfo))
-            {
-            this->ts = ' ';
-            this->t100 = std::int32_t(m.Temperature * 100.0f + 0.5f);
-            if (m.Temperature < 0) {
-                this->ts = '-';
-                this->t100 = -this->t100;
-                }
-            this->tint = this->t100 / 100;
-            this->tfrac = this->t100 - (tint * 100);
-
-            this->rh100 = std::int32_t(m.RelativeHumidity * 100.0f + 0.5f);
-            this->rhint = this->rh100 / 100;
-            this->rhfrac = this->rh100 - (this->rhint * 100);
-
-            this->co2_100 = std::int32_t(m.CO2ppm * 100.0f + 0.5f);
-            this->co2int = this->co2_100 / 100;
-            this->co2frac = this->co2_100 - (this->co2int * 100);
-            }
-
-        this->m_data.co2ppm.CO2ppm = m.CO2ppm;
-        }
+    this->m_data.flags = Flags(0);
     }
 
 void cMeasurementLoop::updateSynchronousMeasurements()
     {
-    this->m_currentIntervalSec = uint32_t(millis() - this->m_startTimeMs) / 1000;
-    if (this->m_currentIntervalSec > m_versionSec)
-        {
-        this->m_startTimeMs = millis();
-        this->m_fVersionOta = true;
-        }
-
     this->m_data.Vbat = gCatena.ReadVbat();
-    if (! this->m_fVersionOta)
-        this->fData_Vbat = true;
-
-    if (this->m_fVersionOta)
-        {
-        this->m_data.ver.Major = kMajor;
-        this->m_data.ver.Minor = kMinor;
-        this->m_data.ver.Patch = kPatch;
-        this->m_data.ver.Local = kLocal;
-        this->fData_Version = true;
-        }
-
-    if (this->m_data.Vbat < 3.2f)
-        this->m_fDatalimit = true;
-    else
-        this->m_fDatalimit = false;
-
-    // modify Activity Timer if uplink interval is one hour
-    if (this->m_fDatalimit)
-        {
-        // timer has fired. grab data
-        this->m_ActivityTimer.begin(this->m_ActivityDataLimitTimerSec * 1000);
-        }
-    else    /* modify Activity Timer if uplink interval 6 minutes */
-        {
-        // timer has fired. grab data
-        this->m_ActivityTimer.begin(this->m_ActivityTimerSec * 1000);
-        }
+    this->m_data.flags |= Flags::Vbat;
 
     this->m_data.Vbus = gCatena.ReadVbus();
+    this->m_data.flags |= Flags::Vbus;
 
     if (gCatena.getBootCount(this->m_data.BootCount))
         {
-        if (! this->m_fVersionOta)
-            this->fData_BootCount = true;
+        this->m_data.flags |= Flags::Boot;
         }
 
-    gpMeasurementLoopConcrete->takeMeasurements();
+    if (this->m_fSht3x)
+        {
+        cSHT3x::Measurements m;
+        this->m_Sht.getTemperatureHumidity(m);
+        this->m_data.env.Temperature = m.Temperature;
+        this->m_data.env.Humidity = m.Humidity;
+        this->m_data.flags |= Flags::TH;
+        }
 
-    // disable flag for version number over air
-    this->m_fVersionOta = false;
+    // LTR329 light sensor is handled separately
 
     // update activity -- this is is already handled elsewhere
 
     // grab data on pellets.
     cPelletFeeder::PelletFeederData data;
     this->m_PelletFeeder.readAndReset(data);
-    this->fData_Pellet = true;
+    this->m_data.flags |= Flags::Pellets;
 
     // fill in the measurement.
     for (unsigned i = 0; i < kMaxPelletEntries; ++i)
@@ -508,11 +395,6 @@ void cMeasurementLoop::updateSynchronousMeasurements()
 
     // grab time of last activity update.
     gClock.get(this->m_data.DateTime);
-
-    if (this->m_data.co2ppm.CO2ppm != 0.0f)
-        {
-        this->fData_CO2 = true;
-        }
     }
 
 void cMeasurementLoop::measureActivity()
@@ -529,7 +411,7 @@ void cMeasurementLoop::measureActivity()
     // get another measurement.
     uint32_t const tDelta = this->m_pirLastTimeMs - this->m_pirBaseTimeMs;
     this->m_data.activity[this->m_data.nActivity++].Avg = this->m_pirSum / tDelta;
-    this->fData_Activity = true;
+    this->m_data.flags |= Flags::Activity;
 
     // record time. Since a zero timevalue is always invalid, we don't
     // need to check validity.
@@ -540,6 +422,70 @@ void cMeasurementLoop::measureActivity()
     this->m_pirMax = -1.0f;
     this->m_pirMin = 1.0f;
     this->m_pirSum = 0.0f;
+    }
+
+void cMeasurementLoop::updateLightMeasurements()
+    {
+    if (this->m_Ltr.startSingleMeasurement())
+        {
+        float currentLux;
+        bool fHardError;
+
+        static constexpr float kMax_Gain_96 = 640.0f;
+        static constexpr float kMax_Gain_48 = 1280.0f;
+        static constexpr float kMax_Gain_8 = 7936.0f;
+        static constexpr float kMax_Gain_4 = 16128.0f;
+        static constexpr float kMax_Gain_2 = 32512.0f;
+        static constexpr float kMax_Gain_1 = 65535.0f;
+
+        while (! this->m_Ltr.queryReady(fHardError))
+            {
+            if (fHardError)
+                break;
+            }
+
+        if (fHardError)
+            {
+            this->m_fHardError = true;
+            if (gLog.isEnabled(gLog.DebugFlags::kError))
+                {
+                gLog.printf(
+                    gLog.kAlways,
+                    "LTR329 queryReady failed: status %s(%u)\n",
+                    this->m_Ltr.getLastErrorName(),
+                    unsigned(this->m_Ltr.getLastError())
+                    );
+
+                this->m_Ltr.begin();
+                }
+            }
+        else
+            {
+            currentLux = this->m_Ltr.getLux();
+
+            if (currentLux <= kMax_Gain_96)
+                this->m_Ltr.setGain(96);
+            else if (currentLux <= kMax_Gain_48)
+                this->m_Ltr.setGain(48);
+            else if (currentLux <= kMax_Gain_8)
+                this->m_Ltr.setGain(8);
+            else if (currentLux <= kMax_Gain_4)
+                this->m_Ltr.setGain(4);
+            else if (currentLux <= kMax_Gain_2)
+                this->m_Ltr.setGain(2);
+            else
+                this->m_Ltr.setGain(1);
+
+            currentLux = this->m_Ltr.getLux();
+            this->m_data.flags |= Flags::Light;
+            this->m_data.light.Lux = currentLux;
+
+            if (currentLux <= 100)
+                gpMeasurementLoopConcrete->m_fLowLight = true;
+            else
+                gpMeasurementLoopConcrete->m_fLowLight = false;
+            }
+        }
     }
 
 void cMeasurementLoop::resetPirAccumulation()
@@ -605,20 +551,18 @@ void cMeasurementLoop::startTransmission(
     this->m_txpending = true;
     this->m_txcomplete = this->m_txerr = false;
 
-    if (this->uplinkPort != kUplinkPortDataLimit)
+    std::uint8_t uplinkPort;
+    if (this->fNwTimeSet)
         {
-        if (this->fNwTimeSet)
-            {
-            this->uplinkPort = kUplinkPortwithNwTime;
-            this->fNwTimeSet = false;
-            }
-        else
-            {
-            this->uplinkPort = kUplinkPortDefault;
-            }
+        uplinkPort = kUplinkPortwithNwTime;
+        this->fNwTimeSet = false;
+        }
+    else
+        {
+        uplinkPort = kUplinkPort;
         }
 
-    if (! gLoRaWAN.SendBuffer(b.getbase(), b.getn(), sendBufferDoneCb, (void *)this, fConfirmed, this->uplinkPort))
+    if (! gLoRaWAN.SendBuffer(b.getbase(), b.getn(), sendBufferDoneCb, (void *)this, fConfirmed, uplinkPort))
         {
         // uplink wasn't launched.
         this->m_txcomplete = true;
@@ -673,10 +617,6 @@ void cMeasurementLoop::poll()
         if (this->m_data.nActivity == this->kMaxActivityEntries)
             fEvent = true;
         }
-
-    auto const msToNext = this->m_Scd.getMsToNextMeasurement();
-    if (msToNext < 20)
-        updateScd30Measurements();
 
     if (this->m_fTimerActive)
         {
@@ -755,9 +695,9 @@ void user_request_network_time_cb(void *pVoidUserUTCTime, int flagSuccess) {
     if (! gClock.set(gDate, &errCode))
         gCatena.SafePrintf("couldn't set clock: %u\n", errCode);
     else
-        gpMeasurementLoopConcrete->fNwTimeSet = true;
+        gMeasurementLoop.fNwTimeSet = true;
 
-    gpMeasurementLoopConcrete->startTime = millis();
+    gMeasurementLoop.startTime = millis();
     }
 
 static void setup_lptim(uint32_t msec)
@@ -814,7 +754,7 @@ void lptimSleep(uint32_t timeOut)
 
     setup_lptim(sleepTimeMS);
 
-    gpMeasurementLoopConcrete->deepSleepPrepare();
+    gMeasurementLoop.deepSleepPrepare();
 
     HAL_SuspendTick();
     HAL_PWR_EnterSTOPMode(
@@ -826,7 +766,7 @@ void lptimSleep(uint32_t timeOut)
     HAL_ResumeTick();
     HAL_AddTick(sleepTimeMS);
 
-    gpMeasurementLoopConcrete->deepSleepRecovery();
+    gMeasurementLoop.deepSleepRecovery();
     }
 
 uint32_t HAL_AddTick(
@@ -888,23 +828,6 @@ void cMeasurementLoop::updateTxCycleTime()
             // it's now one (otherwise we couldn't be here.)
             gCatena.SafePrintf("resetting tx cycle to default: %u\n", this->m_txCycleSec_Permanent);
 
-            this->uplinkPort = kUplinkPortDefault;
-            this->setTxCycleTime(this->m_txCycleSec_Permanent, 0);
-            }
-    else if (this->m_fDatalimit && this->uplinkPort != kUplinkPortDataLimit)
-            {
-            // transmit to network once in an hour, if Vbat < 3.3V.
-            gCatena.SafePrintf("resetting tx cycle to data limit mode: %u\n", this->m_txCycleSec_Low_Power);
-
-            this->uplinkPort = kUplinkPortDataLimit;
-            this->setTxCycleTime(this->m_txCycleSec_Low_Power, 0);
-            }
-    else if (!this->m_fDatalimit && this->uplinkPort == kUplinkPortDataLimit)
-            {
-            // it's back to default
-            gCatena.SafePrintf("resetting tx cycle back to default: %u\n", this->m_txCycleSec_Permanent);
-
-            this->uplinkPort = kUplinkPortDefault;
             this->setTxCycleTime(this->m_txCycleSec_Permanent, 0);
             }
     else
@@ -1046,33 +969,9 @@ void cMeasurementLoop::doDeepSleep()
     this->m_fsm.eval();
     }
 
-//
-// call this after waking up from a long (> 15 minute) sleep to correct for LMIC sleep defect
-// This should be done after updating micros() and updating LMIC's idea of time based on
-// the sleep time.
-//
-void fixLmicTimeCalculationAfterWakeup(void) {
-    ostime_t const now = os_getTime();
-    // just tell the LMIC that we're available *now*.
-    LMIC.globalDutyAvail = now;
-    // no need to randomize
-    // for EU-like, we need to reset all the channel avail times to "now"
-#if CFG_LMIC_EU_like
-    for (unsigned i = 0; i < MAX_BANDS; ++i) {
-        LMIC.bands[i].avail = now;
-    }
-#endif
-}
-
 void cMeasurementLoop::deepSleepPrepare(void)
     {
     pinMode(kVddPin, INPUT);
-
-    if (this->m_fSleepScd30)
-        {
-        // stop the SCD30; we leave it running.
-        this->m_Scd.end();
-        }
 
     Serial.end();
     Wire.end();
@@ -1092,28 +991,8 @@ void cMeasurementLoop::deepSleepRecovery(void)
     Serial.begin();
     Wire.begin();
     SPI.begin();
-    fixLmicTimeCalculationAfterWakeup();
-
-    if (this->m_fSleepScd30)
-        {
-        // start the SCD30, and make sure it passes the bring-up.
-        // record success in m_fDiffPressure, which is used later
-        // when collecting results to transmit.
-        this->m_fScd30 = this->m_Scd.begin();
-        this->m_fSleepScd30 = false;
-
-        // if it didn't start, log a message.
-        if (! this->m_fScd30)
-            {
-            if (gLog.isEnabled(gLog.DebugFlags::kError))
-                gLog.printf(
-                        gLog.kAlways,
-                        "SCD30 begin() failed after sleep: status %s(%u)\n",
-                        this->m_Scd.getLastErrorName(),
-                        unsigned(this->m_Scd.getLastError())
-                        );
-            }
-        }
+    //if (this->m_pSPI2)
+    //    this->m_pSPI2->begin();
     }
 
 /****************************************************************************\

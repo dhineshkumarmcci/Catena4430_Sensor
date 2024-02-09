@@ -43,6 +43,7 @@ extern  McciCatena::Catena::LoRaWAN             gLoRaWAN;
 extern  McciCatena::StatusLed                   gLed;
 
 extern  SPIClass                                gSPI2;
+extern  McciCatena4430::cMeasurementLoop        gMeasurementLoop;
 
 //   The flash
 extern  McciCatena::Catena_Mx25v8035f           gFlash;
@@ -55,7 +56,5 @@ extern  McciCatena::cDownload                   gDownload;
 
 // the SD card
 extern  SDClass                                 gSD;
-
-extern  McciCatena4430::cMeasurementLoop        *gpMeasurementLoopConcrete;
 
 #endif // !defined(_Catena4430_Sensor_h_)
