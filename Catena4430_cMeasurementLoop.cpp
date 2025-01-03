@@ -481,9 +481,9 @@ void cMeasurementLoop::updateLightMeasurements()
             this->m_data.light.Lux = currentLux;
 
             if (currentLux <= 100)
-                gpMeasurementLoopConcrete->m_fLowLight = true;
+                this->m_fLowLight = true;
             else
-                gpMeasurementLoopConcrete->m_fLowLight = false;
+                this->m_fLowLight = false;
             }
         }
     }
